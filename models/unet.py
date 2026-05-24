@@ -93,16 +93,52 @@ class BaseUNet(nn.Module):
         
         # 글로벌 잔차 학습 적용 (입력 이미지 + 디코더 잔차)
         return x + residual
+
+class MultiDecoderUNet(nn.Module):
+    def __init__(self, in_channels=3, out_channels=3, base_ch=32, num_decoders=2):
+        super().__init__()
+        self.num_decoders = num_decoders
+        
+        # 인코더 구조 (공유됨 - BaseUNet과 동일)
+        self.init_conv = nn.Conv2d(in_channels, base_ch, kernel_size=3, padding=1)
+        self.init_res = ResModule(base_ch)
+        self.enc1 = EncoderBlock(base_ch, base_ch * 2)
+        self.enc2 = EncoderBlock(base_ch * 2, base_ch * 4)
+        
+        # [Phase 1 핵심] num_decoders 개수만큼의 디코더를 nn.ModuleList로 묶어서 관리
+        self.decoders = nn.ModuleList([
+            Decoder(base_ch, out_channels) for _ in range(num_decoders)
+        ])
+
+    def forward(self, x):
+        # 1. 단일 인코더를 통한 특징(feature) 추출
+        skip1 = self.init_res(self.init_conv(x)) # Scale 1
+        skip2 = self.enc1(skip1)                 # Scale 2
+        z = self.enc2(skip2)                     # Scale 3 (Bottleneck)
+        
+        # 2. 다중 디코더를 통과시켜 각각의 서브 잔차(sub-residual)를 도출하고 합산
+        total_residual = 0
+        for decoder in self.decoders:
+            total_residual += decoder(z, skip2, skip1)
+            
+        # 3. 글로벌 잔차 학습 적용 (입력 이미지 + 최종 통합 잔차)
+        return x + total_residual
     
-    # 텐서 크기 및 모델 파라미터 검증 테스트
+# 텐서 크기 및 모델 파라미터 검증 테스트 (기존 __main__ 블록을 대체 또는 수정)
 if __name__ == "__main__":
-    model = BaseUNet()
+    # 강제로 CPU만 사용하도록 설정
+    device = torch.device("cpu") 
+    dummy_input = torch.randn(1, 3, 256, 256).to(device)
     
-    # 1. 파라미터 수 계산
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total Parameters: {total_params / 1e6:.2f}M")
+    # 1. Base U-Net 테스트
+    base_model = BaseUNet().to(device)
+    base_params = sum(p.numel() for p in base_model.parameters() if p.requires_grad)
+    print(f"[Base U-Net] Total Parameters: {base_params / 1e6:.2f}M")
     
-    # 2. 더미 데이터를 통한 텐서 흐름 테스트
-    dummy_input = torch.randn(1, 3, 256, 256)
-    output = model(dummy_input)
-    print(f"Output shape: {output.shape}") # [1, 3, 256, 256]이 나와야 정상
+    # 2. Multi-Decoder U-Net 파라미터 변화 테스트 (Table 1 검증용)
+    for n in [2, 3, 4]:
+        multi_model = MultiDecoderUNet(num_decoders=n).to(device)
+        multi_params = sum(p.numel() for p in multi_model.parameters() if p.requires_grad)
+        output = multi_model(dummy_input)
+        
+        print(f"[U-Net {n}D] Total Parameters: {multi_params / 1e6:.2f}M | Output shape: {output.shape}")
